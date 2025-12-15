@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 type Prefab = {
@@ -119,6 +119,7 @@ function App() {
   const [wsUrl, setWsUrl] = useState('ws://localhost:8765')
   const [sessionId, setSessionId] = useState('room-1')
   const [wsStatus, setWsStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected')
+  const [participants, setParticipants] = useState<string[]>([])
   const wsRef = useRef<WebSocket | null>(null)
   const [clientId] = useState(() => `client-${Math.random().toString(16).slice(2, 8)}`)
   const applyingRemoteRef = useRef(false)
@@ -382,11 +383,11 @@ function App() {
     setLastPoint(null)
   }
 
-  const handleWheel: React.WheelEventHandler<HTMLCanvasElement> = (e) => {
+  const handleWheel: React.WheelEventHandler<HTMLCanvasElement> = useCallback((e) => {
     e.preventDefault()
     const direction = e.deltaY > 0 ? -0.12 : 0.12
     setCamera((prev) => ({ ...prev, zoom: clamp(prev.zoom + direction, 0.3, 3.5) }))
-  }
+  }, [])
 
   const handleNewProject = () => {
     const w = clamp(Number(newProjectForm.width) || 512, 256, 10000)
@@ -486,7 +487,6 @@ function App() {
       socket.onopen = () => {
         setWsStatus('connected')
         socket.send(JSON.stringify({ type: 'join', sessionId, clientId }))
-        socket.send(JSON.stringify({ type: 'project_snapshot', sessionId, clientId, project }))
       }
 
       socket.onmessage = (event) => {
@@ -499,6 +499,9 @@ function App() {
             applyingRemoteRef.current = true
             setProject({ ...incoming })
           }
+          if (msg.type === 'participants' && msg.sessionId === sessionId && Array.isArray(msg.clients)) {
+            setParticipants(msg.clients as string[])
+          }
         } catch (err) {
           console.warn('WS parse error', err)
         }
@@ -506,6 +509,7 @@ function App() {
 
       socket.onclose = () => {
         setWsStatus('disconnected')
+        setParticipants([])
         if (wsRef.current === socket) wsRef.current = null
       }
 
@@ -526,6 +530,14 @@ function App() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const listener = (event: WheelEvent) => handleWheel(event as unknown as React.WheelEvent<HTMLCanvasElement>)
+    canvas.addEventListener('wheel', listener, { passive: false })
+    return () => canvas.removeEventListener('wheel', listener)
+  }, [handleWheel])
 
   useEffect(() => {
     if (wsStatus !== 'connected') return
@@ -788,6 +800,10 @@ function App() {
                   <span>状态</span>
                   <strong>{wsStatus === 'connected' ? '已连接' : wsStatus === 'connecting' ? '连接中' : '未连接'}</strong>
                 </div>
+                <div className="stat-row" style={{ borderBottom: 'none', padding: 0 }}>
+                  <span>协作人数</span>
+                  <strong>{participants.length}</strong>
+                </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button className={wsStatus === 'connected' ? 'ghost' : 'primary'} onClick={connectWs} disabled={wsStatus === 'connecting'}>
                     {wsStatus === 'connected' ? '已连接' : '连接'}
@@ -796,6 +812,15 @@ function App() {
                     断开
                   </button>
                 </div>
+                {participants.length > 0 && (
+                  <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {participants.map((pid) => (
+                      <div key={pid} className="pill" style={{ width: 'fit-content', background: 'rgba(255,255,255,0.06)' }}>
+                        {pid}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </section>
 
@@ -886,7 +911,6 @@ function App() {
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
               onPointerCancel={handlePointerUp}
-              onWheel={handleWheel}
             />
             <div className="hint">左键放置/拖动，右键或中键平移，滚轮缩放，双指可缩放</div>
           </div>

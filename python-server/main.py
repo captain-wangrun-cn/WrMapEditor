@@ -4,10 +4,9 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Set
+from typing import Any, Dict, Set
 
 import websockets
-from websockets.server import WebSocketServerProtocol
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
 
@@ -17,7 +16,8 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).parent / "data"))
 
 @dataclass
 class Session:
-    clients: Set[WebSocketServerProtocol] = field(default_factory=set)
+    clients: Set[Any] = field(default_factory=set)
+    client_ids: dict[Any, str] = field(default_factory=dict)
     last_project: dict | None = None
 
 sessions: Dict[str, Session] = {}
@@ -54,26 +54,28 @@ def save_session_project(session_id: str, project: dict):
     except Exception as exc:
         logging.warning("Failed to save session %s: %s", session_id, exc)
 
-async def send_json(ws: WebSocketServerProtocol, payload: dict):
+async def send_json(ws: Any, payload: dict) -> bool:
     try:
         await ws.send(json.dumps(payload))
+        return True
     except Exception as exc:
         logging.warning("Failed to send message: %s", exc)
+        return False
 
-async def broadcast(session_id: str, payload: dict, skip: WebSocketServerProtocol | None = None):
+async def broadcast(session_id: str, payload: dict, skip: Any | None = None):
     session = sessions.get(session_id)
     if not session:
         return
     for client in list(session.clients):
-        if client.closed:
-            session.clients.discard(client)
-            continue
         if skip and client is skip:
             continue
-        await send_json(client, payload)
+        ok = await send_json(client, payload)
+        if not ok:
+            session.clients.discard(client)
 
-async def handler(ws: WebSocketServerProtocol):
+async def handler(ws):
     session_id = None
+    client_id = ""
     try:
         async for raw in ws:
             try:
@@ -84,7 +86,7 @@ async def handler(ws: WebSocketServerProtocol):
 
             mtype = msg.get("type")
             session_id = msg.get("sessionId") or session_id
-            client_id = msg.get("clientId")
+            client_id = msg.get("clientId") or client_id or "guest"
             project = msg.get("project")
 
             if not session_id:
@@ -93,6 +95,7 @@ async def handler(ws: WebSocketServerProtocol):
 
             session = sessions.setdefault(session_id, Session())
             session.clients.add(ws)
+            session.client_ids[ws] = client_id
 
             # Lazy-load persisted snapshot if memory has none.
             if session.last_project is None:
@@ -102,11 +105,17 @@ async def handler(ws: WebSocketServerProtocol):
                 logging.info("Client %s joined session %s", client_id, session_id)
                 if session.last_project:
                     await send_json(ws, {"type": "project_snapshot", "sessionId": session_id, "project": session.last_project})
+                await broadcast(session_id, {"type": "participants", "sessionId": session_id, "clients": list(session.client_ids.values())})
                 continue
 
             # Both "update_project" and "project_snapshot" carry the latest full state from a client.
             # Store it server-side and broadcast to other clients so late joiners and active peers stay in sync.
             if mtype in {"update_project", "project_snapshot"} and project:
+                # Avoid overwriting newer state with older timestamps if provided
+                incoming_ts = project.get("lastUpdatedAt") if isinstance(project, dict) else None
+                current_ts = session.last_project.get("lastUpdatedAt") if isinstance(session.last_project, dict) else None
+                if current_ts and incoming_ts and incoming_ts < current_ts:
+                    continue
                 session.last_project = project
                 save_session_project(session_id, project)
                 await broadcast(session_id, {"type": "project_snapshot", "sessionId": session_id, "project": project}, skip=ws)
@@ -121,6 +130,9 @@ async def handler(ws: WebSocketServerProtocol):
     finally:
         if session_id and session_id in sessions:
             sessions[session_id].clients.discard(ws)
+            sessions[session_id].client_ids.pop(ws, None)
+            if sessions[session_id].clients:
+                asyncio.create_task(broadcast(session_id, {"type": "participants", "sessionId": session_id, "clients": list(sessions[session_id].client_ids.values())}))
             if not sessions[session_id].clients:
                 sessions.pop(session_id, None)
         logging.info("Client %s disconnected from session %s", ws.remote_address, session_id)
