@@ -61,6 +61,14 @@
   min-height: 0;
 }
 
+.layout.sidebar-hidden {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.layout.sidebar-hidden .sidebar {
+  display: none;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -258,6 +266,19 @@ button.primary {
 
 button.ghost {
   background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-toggle-floating {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 5;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #e5e7eb;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(6px);
 }
 
 @media (max-width: 1200px) {

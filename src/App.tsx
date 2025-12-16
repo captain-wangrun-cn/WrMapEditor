@@ -67,7 +67,7 @@ const createProject = (name: string, width: number, height: number): Project => 
 })
 
 function App() {
-  const APP_VERSION = 'v0.1.0'
+  const APP_VERSION = 'v1.0.0'
 
   const savedProject = useMemo(() => {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -108,6 +108,13 @@ function App() {
     width: 120,
     height: 60,
   })
+  const [editPrefabForm, setEditPrefabForm] = useState({
+    name: '',
+    color: '#f59e0b',
+    emoji: '',
+    width: 120,
+    height: 60,
+  })
   const [placementSettings, setPlacementSettings] = useState({
     width: 0,
     height: 0,
@@ -115,11 +122,15 @@ function App() {
     rotation: 0,
     snapEnabled: true,
   })
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => (typeof window !== 'undefined' ? window.innerWidth >= 960 : true))
+  const hasUserToggledSidebar = useRef(false)
+  const lastViewportWidth = useRef<number | null>(typeof window !== 'undefined' ? window.innerWidth : null)
 
   const [wsUrl, setWsUrl] = useState('ws://localhost:8765')
   const [sessionId, setSessionId] = useState('room-1')
   const [wsStatus, setWsStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected')
   const [participants, setParticipants] = useState<string[]>([])
+  const [awaitingSnapshot, setAwaitingSnapshot] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const [clientId] = useState(() => `client-${Math.random().toString(16).slice(2, 8)}`)
   const applyingRemoteRef = useRef(false)
@@ -142,8 +153,39 @@ function App() {
   }, [])
 
   useEffect(() => {
+    const handleResize = () => {
+      if (typeof window === 'undefined') return
+      const width = window.innerWidth
+      const prevWidth = lastViewportWidth.current ?? width
+      lastViewportWidth.current = width
+
+      if (width >= 960) {
+        setIsSidebarOpen(true)
+        return
+      }
+
+      const crossedToMobile = prevWidth >= 960 && width < 960
+      if (crossedToMobile && !hasUserToggledSidebar.current) {
+        setIsSidebarOpen(false)
+      }
+    }
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
+  useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(project))
   }, [project])
+
+  const toggleSidebar = () => {
+    hasUserToggledSidebar.current = true
+    setIsSidebarOpen((v) => !v)
+  }
+
+  const openSidebar = () => {
+    hasUserToggledSidebar.current = true
+    setIsSidebarOpen(true)
+  }
 
   const screenToWorld = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current
@@ -445,6 +487,38 @@ function App() {
     setCustomPrefabForm({ name: '', color: '#f59e0b', emoji: '', width: 120, height: 60 })
   }
 
+  const handleUpdatePrefab = () => {
+    const target = project.prefabs.find((p) => p.id === selectedPrefabId)
+    if (!target) return
+    const name = editPrefabForm.name.trim() || target.name
+    const updated: Prefab = {
+      ...target,
+      name,
+      color: editPrefabForm.color,
+      emoji: editPrefabForm.emoji || undefined,
+      defaultWidth: Math.max(16, editPrefabForm.width),
+      defaultHeight: Math.max(16, editPrefabForm.height),
+    }
+    setProject((prev) => stampProject({
+      ...prev,
+      prefabs: prev.prefabs.map((p) => (p.id === target.id ? updated : p)),
+    }))
+  }
+
+  const handleDeletePrefab = () => {
+    const target = project.prefabs.find((p) => p.id === selectedPrefabId)
+    if (!target) return
+    if (!confirm(`删除预制 “${target.name}” 以及引用它的实体？`)) return
+    setProject((prev) => stampProject({
+      ...prev,
+      prefabs: prev.prefabs.filter((p) => p.id !== target.id),
+      entities: prev.entities.filter((e) => e.prefabId !== target.id),
+    }))
+    const remaining = project.prefabs.filter((p) => p.id !== target.id)
+    setSelectedPrefabId(remaining[0]?.id ?? '')
+    setSelectedEntityId(null)
+  }
+
   const handleClear = () => {
     if (!confirm('确定要清空当前场景吗？')) return
     setProject((prev) => stampProject({ ...prev, entities: [] }))
@@ -486,7 +560,9 @@ function App() {
 
       socket.onopen = () => {
         setWsStatus('connected')
+        setAwaitingSnapshot(true)
         socket.send(JSON.stringify({ type: 'join', sessionId, clientId }))
+        socket.send(JSON.stringify({ type: 'request_snapshot', sessionId, clientId }))
       }
 
       socket.onmessage = (event) => {
@@ -498,6 +574,10 @@ function App() {
             const incoming = ensureProjectDefaults(msg.project as Project)
             applyingRemoteRef.current = true
             setProject({ ...incoming })
+            setAwaitingSnapshot(false)
+          }
+          if (msg.type === 'no_snapshot' && msg.sessionId === sessionId) {
+            setAwaitingSnapshot(false)
           }
           if (msg.type === 'participants' && msg.sessionId === sessionId && Array.isArray(msg.clients)) {
             setParticipants(msg.clients as string[])
@@ -510,11 +590,13 @@ function App() {
       socket.onclose = () => {
         setWsStatus('disconnected')
         setParticipants([])
+        setAwaitingSnapshot(false)
         if (wsRef.current === socket) wsRef.current = null
       }
 
       socket.onerror = () => {
         setWsStatus('disconnected')
+        setAwaitingSnapshot(false)
       }
     } catch (err) {
       console.error('WS connect failed', err)
@@ -541,6 +623,7 @@ function App() {
 
   useEffect(() => {
     if (wsStatus !== 'connected') return
+    if (awaitingSnapshot) return
     if (applyingRemoteRef.current) {
       applyingRemoteRef.current = false
       return
@@ -549,7 +632,7 @@ function App() {
     if (!socket || socket.readyState !== WebSocket.OPEN) return
     const payload = { type: 'update_project', sessionId, clientId, project }
     socket.send(JSON.stringify(payload))
-  }, [project, wsStatus, sessionId, clientId])
+  }, [project, wsStatus, sessionId, clientId, awaitingSnapshot])
 
   return (
     <div className="app-shell">
@@ -568,6 +651,9 @@ function App() {
           <div className="pill">{Math.round(project.width)} × {Math.round(project.height)} px</div>
         </div>
         <div className="toolbar">
+          <button className="ghost" onClick={toggleSidebar}>
+            {isSidebarOpen ? '折叠面板' : '展开面板'}
+          </button>
           <button className="ghost" onClick={handleCenter}>居中</button>
           <button className={tool === 'place' ? 'primary' : 'ghost'} onClick={() => setTool('place')}>放置</button>
           <button className={tool === 'select' ? 'primary' : 'ghost'} onClick={() => setTool('select')}>选择/移动</button>
@@ -579,7 +665,7 @@ function App() {
         </div>
       </header>
 
-      <main className="layout">
+      <main className={`layout ${isSidebarOpen ? '' : 'sidebar-hidden'}`}>
         <aside className="sidebar">
           <div className="sidebar-scroll">
             <section className="panel">
@@ -633,6 +719,13 @@ function App() {
                     onClick={() => {
                       setSelectedPrefabId(prefab.id)
                       setTool('place')
+                      setEditPrefabForm({
+                        name: prefab.name,
+                        color: prefab.color,
+                        emoji: prefab.emoji ?? '',
+                        width: prefab.defaultWidth,
+                        height: prefab.defaultHeight,
+                      })
                       setPlacementSettings((s) => ({ ...s, width: 0, height: 0, scale: 1, rotation: 0 }))
                     }}
                   >
@@ -692,6 +785,62 @@ function App() {
                   />
                 </label>
                 <button onClick={handleAddPrefab}>添加预制</button>
+              </div>
+
+              <div className="panel-title" style={{ marginTop: 12 }}>编辑/删除预制</div>
+              <div className="form-grid">
+                <label>
+                  名称
+                  <input
+                    value={editPrefabForm.name}
+                    disabled={!selectedPrefabId}
+                    onChange={(e) => setEditPrefabForm({ ...editPrefabForm, name: e.target.value })}
+                  />
+                </label>
+                <label>
+                  颜色
+                  <input
+                    type="color"
+                    value={editPrefabForm.color}
+                    disabled={!selectedPrefabId}
+                    onChange={(e) => setEditPrefabForm({ ...editPrefabForm, color: e.target.value })}
+                  />
+                </label>
+                <label>
+                  图标
+                  <input
+                    value={editPrefabForm.emoji}
+                    disabled={!selectedPrefabId}
+                    placeholder="可选Emoji"
+                    onChange={(e) => setEditPrefabForm({ ...editPrefabForm, emoji: e.target.value })}
+                  />
+                </label>
+                <label>
+                  宽度
+                  <input
+                    type="number"
+                    min={16}
+                    max={512}
+                    value={editPrefabForm.width}
+                    disabled={!selectedPrefabId}
+                    onChange={(e) => setEditPrefabForm({ ...editPrefabForm, width: Number(e.target.value) })}
+                  />
+                </label>
+                <label>
+                  高度
+                  <input
+                    type="number"
+                    min={16}
+                    max={512}
+                    value={editPrefabForm.height}
+                    disabled={!selectedPrefabId}
+                    onChange={(e) => setEditPrefabForm({ ...editPrefabForm, height: Number(e.target.value) })}
+                  />
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={handleUpdatePrefab} disabled={!selectedPrefabId}>保存修改</button>
+                  <button className="ghost" onClick={handleDeletePrefab} disabled={!selectedPrefabId}>删除预制</button>
+                </div>
               </div>
             </section>
 
@@ -904,6 +1053,11 @@ function App() {
         </aside>
 
         <section className="canvas-area">
+          {!isSidebarOpen && (
+            <button className="sidebar-toggle-floating" onClick={openSidebar}>
+              展开面板
+            </button>
+          )}
           <div className="canvas-shell" ref={surfaceRef}>
             <canvas
               ref={canvasRef}

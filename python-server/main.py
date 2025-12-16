@@ -108,6 +108,13 @@ async def handler(ws):
                 await broadcast(session_id, {"type": "participants", "sessionId": session_id, "clients": list(session.client_ids.values())})
                 continue
 
+            if mtype == "request_snapshot":
+                if session.last_project:
+                    await send_json(ws, {"type": "project_snapshot", "sessionId": session_id, "project": session.last_project})
+                else:
+                    await send_json(ws, {"type": "no_snapshot", "sessionId": session_id})
+                continue
+
             # Both "update_project" and "project_snapshot" carry the latest full state from a client.
             # Store it server-side and broadcast to other clients so late joiners and active peers stay in sync.
             if mtype in {"update_project", "project_snapshot"} and project:
